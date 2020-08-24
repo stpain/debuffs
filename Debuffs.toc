@@ -1,0 +1,7 @@
+## Interface: 11300
+## Author: S T Pain
+## Version: 1.0.2
+## Title: |cffABD473Debuffs|r
+## SavedVariables: DebuffsGlobal
+
+Debuffs.lua
