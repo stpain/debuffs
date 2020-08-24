@@ -16,27 +16,38 @@
 
 local _, Debuffs = ...
 
+local h, t = GetTime(), GetServerTime()
+print(h)
+print(t)
+Debuffs.TimeDiff = (t-h)
+
 Debuffs.CooldownFrames = {}
 
 Debuffs.Combat = {}
 
--- this is a shot in the dark but it seems about right, not sure if cooldown template frames adjust this with math.ceil ?
-local bandwidthIn, bandwidthOut, latencyHome, latencyWorld = GetNetStats() -- hmm ?
-local LAG = latencyWorld / 100
 Debuffs.Spells = {
     -- priest
-    [589] = { Duration = 18 + LAG, Name = '' }, -- shadow word: pain rank 1
+    [589] = { Duration = 18, Name = '' }, -- shadow word: pain rank 1
     -- warlock
-    [348] = { Duration = 15 + LAG, Name = '' }, -- immolate rank 1
-    [172] = { Duration = 12 + LAG, Name = '' }, -- corruption rank 1
-    [980] = { Duration = 24 + LAG, Name = '' }, -- agony rank 1
-    [5782] = { Duration = 10 + LAG, Name = '' }, -- fear rank 1
+    [348] = { Duration = 15, Name = '' }, -- immolate rank 1
+    [172] = { Duration = 12, Name = '' }, -- corruption rank 1
+    [980] = { Duration = 24, Name = '' }, -- agony rank 1
+    [5782] = { Duration = 10, Name = '' }, -- fear rank 1
     -- hunter
-    [5116] = { Duration = 4 + LAG, Name = '' }, -- concussive shot
-    [1978] = { Duration = 15 + LAG, Name = '' }, -- serpent string rank 1
-    [13549] = { Duration = 15 + LAG, Name = '' }, -- serpent string rank 2
-    [13550] = { Duration = 15 + LAG, Name = '' }, -- serpent string rank 3
+    [5116] = { Duration = 4, Name = '' }, -- concussive shot
+    [1978] = { Duration = 15, Name = '' }, -- serpent string rank 1
+    [13549] = { Duration = 15, Name = '' }, -- serpent string rank 2
+    [13550] = { Duration = 15, Name = '' }, -- serpent string rank 3
 }
+
+function Debuffs:ADDON_LOADED(...)
+    if ... == 'Debuffs' then
+        self.f:UnregisterEvent('ADDON_LOADED')
+        local prefixRegistered = C_ChatInfo.RegisterAddonMessagePrefix('debuffs-cast')
+        -- local prefixRegistered2 = C_ChatInfo.RegisterAddonMessagePrefix('debuffs-test')
+        -- C_ChatInfo.SendAddonMessage('debuffs-test', GetServerTime(), 'SAY')
+    end
+end
 
 function Debuffs:SetCooldowns()
     local targetGUID = UnitGUID('target')
@@ -44,7 +55,7 @@ function Debuffs:SetCooldowns()
         if _G['TargetFrameDebuff'..i] then
             if not Debuffs.CooldownFrames['TargetFrameDebuff'..i] then
                 Debuffs.CooldownFrames['TargetFrameDebuff'..i] = CreateFrame("Cooldown", tostring('TargetFrameDebuff'..i.."Cooldown"), _G['TargetFrameDebuff'..i], "CooldownFrameTemplate")
-                Debuffs.CooldownFrames['TargetFrameDebuff'..i]:SetHideCountdownNumbers(true)
+                Debuffs.CooldownFrames['TargetFrameDebuff'..i]:SetHideCountdownNumbers(false)
             end
             local name, icon, count, debuffType, duration, expirationTime, source, b, c, spellID, e = UnitDebuff("target", i)
             if source then
@@ -66,6 +77,31 @@ function Debuffs:PLAYER_REGEN_ENABLED(...)
     wipe(self.Combat)
 end
 
+function Debuffs:CHAT_MSG_ADDON(...)
+    local prefix = select(1, ...)
+    -- if prefix == 'debuffs-test' then
+    --     local new = GetServerTime()
+    --     local old = select(2, ...)
+    --     print(new)
+    --     print(old)
+    --     print(old - new)
+    -- end
+    if prefix == 'debuffs-cast' then
+        local msg = select(2, ...)
+        local d = {}
+        for k in msg:gmatch("([^$]+)") do
+            table.insert(d, k)
+        end
+        local targetGUID, playerGUID, spellID, start = d[1], d[2], tonumber(d[3]), tonumber(d[4] - self.TimeDiff) + 1.0 -- convert server time back to local time with allowance for message delay
+        if not self.Combat[targetGUID] then
+            self.Combat[targetGUID] = {
+                [playerGUID] = {}
+            }
+        end
+        self.Combat[targetGUID][playerGUID][spellID] = start
+    end
+end
+
 function Debuffs:UNIT_SPELLCAST_SUCCEEDED(...)
     local t = GetTime()
     local s = GetServerTime()
@@ -78,9 +114,17 @@ function Debuffs:UNIT_SPELLCAST_SUCCEEDED(...)
                 [playerGUID] = {}
             }
         end
+        
         -- TODO: check if cast was resisted/blocked first
-        self.Combat[targetGUID][playerGUID][spellID] = t -- consider if spell can stack?
+
+        --self.Combat[targetGUID][playerGUID][spellID] = t -- use local time for our own data, send server time and convert back when getting message
+        local inInstance, instanceType = IsInInstance()
+        if inInstance and (instanceType:lower() == 'party' or instanceType:lower() == 'raid') then
+            C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..playerGUID..'$'..spellID..'$'..s), instanceType:upper())
+        end
     end
+    -- send this to test
+    C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..playerGUID..'$'..spellID..'$'..s), 'SAY')
 end
 
 -- needed?
@@ -99,6 +143,7 @@ end
 -- needed?
 function Debuffs:UNIT_AURA(...)
     local unitGUID = UnitGUID(...)
+    local playerGUID = UnitGUID('player')
     if unitGUID then
         if not self.Combat[unitGUID] then
             self.Combat[unitGUID] = {
@@ -122,6 +167,8 @@ Debuffs.f:RegisterEvent('COMBAT_LOG_EVENT_UNFILTERED')
 Debuffs.f:RegisterEvent('UNIT_SPELLCAST_SUCCEEDED')
 Debuffs.f:RegisterEvent('PLAYER_REGEN_ENABLED')
 Debuffs.f:RegisterEvent('UNIT_AURA')
+Debuffs.f:RegisterEvent('ADDON_LOADED')
+Debuffs.f:RegisterEvent('CHAT_MSG_ADDON')
 
 Debuffs.f:SetScript('OnEvent', function(self, event, ...)
     Debuffs[event](Debuffs, ...)
