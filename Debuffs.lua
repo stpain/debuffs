@@ -16,14 +16,13 @@
 
 local _, Debuffs = ...
 
-local h, t = GetTime(), GetServerTime()
-print(h)
-print(t)
-Debuffs.TimeDiff = (t-h)
+local home, server = GetTime(), GetServerTime()
+Debuffs.TimeDiff = (server-home)
 
 Debuffs.CooldownFrames = {}
 
 Debuffs.Combat = {}
+Debuffs.UNIT_SPELLCAST_SUCCEEDED_EVENT = {}
 
 Debuffs.Spells = {
     -- priest
@@ -44,8 +43,6 @@ function Debuffs:ADDON_LOADED(...)
     if ... == 'Debuffs' then
         self.f:UnregisterEvent('ADDON_LOADED')
         local prefixRegistered = C_ChatInfo.RegisterAddonMessagePrefix('debuffs-cast')
-        -- local prefixRegistered2 = C_ChatInfo.RegisterAddonMessagePrefix('debuffs-test')
-        -- C_ChatInfo.SendAddonMessage('debuffs-test', GetServerTime(), 'SAY')
     end
 end
 
@@ -75,98 +72,87 @@ end
 --- events
 function Debuffs:PLAYER_REGEN_ENABLED(...)
     wipe(self.Combat)
+    wipe(self.UNIT_SPELLCAST_SUCCEEDED_EVENT)
 end
 
 function Debuffs:CHAT_MSG_ADDON(...)
     local prefix = select(1, ...)
-    -- if prefix == 'debuffs-test' then
-    --     local new = GetServerTime()
-    --     local old = select(2, ...)
-    --     print(new)
-    --     print(old)
-    --     print(old - new)
-    -- end
     if prefix == 'debuffs-cast' then
         local msg = select(2, ...)
         local d = {}
         for k in msg:gmatch("([^$]+)") do
             table.insert(d, k)
         end
-        local targetGUID, playerGUID, spellID, start = d[1], d[2], tonumber(d[3]), tonumber(d[4] - self.TimeDiff) + 1.0 -- convert server time back to local time with allowance for message delay
+        local targetGUID, sourceGUID, spellID, start = d[1], d[2], tonumber(d[3]), tonumber(d[4] - self.TimeDiff) + 1.0 -- convert server time back to local time with allowance for message delay
+        -- print('ADDON MSG')
+        -- local spellName = select(1, GetSpellInfo(spellID))
+        -- print('spell', spellID, spellName)
+        -- print('start (server time)', d[4])
+        -- print('calc local start', start)
+        -- print('---------------------')
         if not self.Combat[targetGUID] then
             self.Combat[targetGUID] = {
-                [playerGUID] = {}
+                [sourceGUID] = {}
             }
         end
-        self.Combat[targetGUID][playerGUID][spellID] = start
+        self.Combat[targetGUID][sourceGUID][spellID] = start
     end
 end
 
 function Debuffs:UNIT_SPELLCAST_SUCCEEDED(...)
-    local t = GetTime()
-    local s = GetServerTime()
-    local targetGUID = UnitGUID('target')
-    local playerGUID = UnitGUID('player')
     local spellID = select(3, ...)
-    if targetGUID then
-        if not self.Combat[targetGUID] then
-            self.Combat[targetGUID] = {
-                [playerGUID] = {}
-            }
-        end
-        
-        -- TODO: check if cast was resisted/blocked first
-
-        --self.Combat[targetGUID][playerGUID][spellID] = t -- use local time for our own data, send server time and convert back when getting message
-        local inInstance, instanceType = IsInInstance()
-        if inInstance and (instanceType:lower() == 'party' or instanceType:lower() == 'raid') then
-            C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..playerGUID..'$'..spellID..'$'..s), instanceType:upper())
-        end
+    local spellName = select(1, GetSpellInfo(spellID))
+    local target = select(1, ...)
+    if spellID and target then
+        self.UNIT_SPELLCAST_SUCCEEDED_EVENT = {
+            SpellID = tonumber(spellID),
+            ServerTime = GetServerTime(),
+            TargetGUID = UnitGUID(target),
+            SourceGUID = UnitGUID('player'),
+        }
+    else
+        wipe(self.UNIT_SPELLCAST_SUCCEEDED_EVENT)
     end
-    -- send this to test
-    C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..playerGUID..'$'..spellID..'$'..s), 'SAY')
+    -- print('SPELLCAST')
+    -- print('spell', spellID, spellName)
+    -- print('local time', GetTime())
+    -- print('server time', GetServerTime())
+    -- print('--------------------')
 end
 
--- needed?
-function Debuffs:PLAYER_TARGET_CHANGED(...)
-    local targetGUID = UnitGUID('target')
-    local playerGUID = UnitGUID('player')
-    if targetGUID then
-        if not self.Combat[targetGUID] then
-            self.Combat[targetGUID] = {
-                [playerGUID] = {}
-            }
-        end
-    end
-end
 
--- needed?
-function Debuffs:UNIT_AURA(...)
-    local unitGUID = UnitGUID(...)
-    local playerGUID = UnitGUID('player')
-    if unitGUID then
-        if not self.Combat[unitGUID] then
-            self.Combat[unitGUID] = {
-                [playerGUID] = {}
-            }
-        end
-    end
-end
-
--- needed?
 function Debuffs:COMBAT_LOG_EVENT_UNFILTERED(...)
-    -- local cleu = {CombatLogGetCurrentEventInfo()}
-    -- for k, v in pairs(cleu) do
-    --     print(k, v)
-    -- end
+    local cleu = {CombatLogGetCurrentEventInfo()}
+    if cleu[2] == 'SPELL_CAST_SUCCESS' then
+        local sourceGUID = cleu[4]
+        local targetGUID = cleu[8]
+        local timestamp = cleu[1]
+        local timestamp_trimmed = tonumber(tostring(timestamp):sub(1, -5))
+        local t = GetTime()
+        -- print('CLEU')
+        -- print('timestamp', timestamp)
+        if self.UNIT_SPELLCAST_SUCCEEDED_EVENT and next(self.UNIT_SPELLCAST_SUCCEEDED_EVENT) then
+            if (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime >= (timestamp_trimmed - 1)) and (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SourceGUID == sourceGUID) then
+                --print('cleu event matches unit_spellcast event')
+                local inInstance, instanceType = IsInInstance()
+                if inInstance and (instanceType:lower() == 'party' or instanceType:lower() == 'raid') then
+                    C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..sourceGUID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime), instanceType:upper())
+                else
+                    -- normal option is to just add directly 
+                    --self.Combat[targetGUID][sourceGUID][self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID] = t -- use local time for our own data, send server time and convert back when getting message
+                end
+                -- use this to test
+                C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..sourceGUID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime), 'SAY')
+            end
+        end
+        --print('--------------------')
+    end
 end
 
 Debuffs.f = CreateFrame('FRAME', 'DebuffEventFrame', UIParent)
-Debuffs.f:RegisterEvent('PLAYER_TARGET_CHANGED')
 Debuffs.f:RegisterEvent('COMBAT_LOG_EVENT_UNFILTERED')
 Debuffs.f:RegisterEvent('UNIT_SPELLCAST_SUCCEEDED')
 Debuffs.f:RegisterEvent('PLAYER_REGEN_ENABLED')
-Debuffs.f:RegisterEvent('UNIT_AURA')
 Debuffs.f:RegisterEvent('ADDON_LOADED')
 Debuffs.f:RegisterEvent('CHAT_MSG_ADDON')
 
