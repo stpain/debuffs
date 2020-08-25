@@ -1,29 +1,40 @@
 --[[
 
+    track player casted spell debuffs on targets, tested with warlock, hunter and priest so far
+
     TODO:
         get spell id table
-        set up send addon messages
-        consider the timings/lag/delay - is it latency or is it just a set time interval between the cast time and the debuff applying time ?
-        make a function to check for resists/blocks - cast 1 fires no issues, cast 2 is resisted, now cooldown shows cast 2 start time incorrectly
+        test addon with party/raid groups
+        consider how to include non casted spells (effects from talents), does this exist in classic or more of a retail thing?
+        consider how to add non spells, melee hits, weapons with effects ? - this will show in cleu/unit_aura, how to get spell/weapon/effect id? classic cleu is basic only
 
     THEORY:
-        if addon users send their spell cast data then the start time can be used
-        with the duration from the spell table to determine the debuff cooldown.
-        UnitBuff() returns a spell id and a source which can be checked against a 
-        table to find the correct start time.
+        UnitBuff() returns no time data but does return spell id and source
+        UNIT_SPELLCAST_SUCCEEDED returns a spell id
+        COMBAT_LOG_EVENT_UNFILTERED returns a source and target
+
+        by adding a time stamp to the events, the addon can track time, spell id,
+        source and target. this info can be sent other other players with the addon
+        where it then updates cooldowns which are added the default target debuff frames
 
 ]]
 
 local _, Debuffs = ...
 
+-- use this to convert from server times sent between players back to local times for cooldown widgets
 local home, server = GetTime(), GetServerTime()
 Debuffs.TimeDiff = (server-home)
 
+-- cooldown widget table
 Debuffs.CooldownFrames = {}
 
+-- combat table, { targetGUID = { sourceGUID = { spellID = start }}}, use this to grab the correct cooldown data for current target/source
 Debuffs.Combat = {}
+
+-- table to hold last spell cast data
 Debuffs.UNIT_SPELLCAST_SUCCEEDED_EVENT = {}
 
+-- table of spells to check when updatign cooldown widgets
 Debuffs.Spells = {
     -- priest
     [589] = { Duration = 18, Name = '' }, -- shadow word: pain rank 1
@@ -39,12 +50,16 @@ Debuffs.Spells = {
     [13550] = { Duration = 15, Name = '' }, -- serpent string rank 3
 }
 
+
 function Debuffs:ADDON_LOADED(...)
     if ... == 'Debuffs' then
         self.f:UnregisterEvent('ADDON_LOADED')
         local prefixRegistered = C_ChatInfo.RegisterAddonMessagePrefix('debuffs-cast')
+
+        -- TODO: make addon_loaded var if prefix fails
     end
 end
+
 
 function Debuffs:SetCooldowns()
     local targetGUID = UnitGUID('target')
@@ -69,25 +84,28 @@ function Debuffs:SetCooldowns()
     end
 end
 
---- events
+--- clear tables after combat
 function Debuffs:PLAYER_REGEN_ENABLED(...)
     wipe(self.Combat)
-    wipe(self.UNIT_SPELLCAST_SUCCEEDED_EVENT)
+    wipe(self.UNIT_SPELLCAST_SUCCEEDED_EVENT) -- maybe a dodgy name?
 end
 
+-- get data from message and update combat table, local vars required ??? maybe pass in directly from table
 function Debuffs:CHAT_MSG_ADDON(...)
     local prefix = select(1, ...)
     if prefix == 'debuffs-cast' then
         local msg = select(2, ...)
-        local d = {}
+        local tbl = {}
         for k in msg:gmatch("([^$]+)") do
-            table.insert(d, k)
+            table.insert(tbl, k)
         end
-        local targetGUID, sourceGUID, spellID, start = d[1], d[2], tonumber(d[3]), tonumber(d[4] - self.TimeDiff) + 1.0 -- convert server time back to local time with allowance for message delay
+        local targetGUID, sourceGUID, spellID = tbl[1], tbl[2], tonumber(tbl[3])
+        -- convert server time back to local time with allowance for message delay
+        local start = tonumber(tbl[4] - self.TimeDiff) + (GetServerTime() - tbl[4])
         -- print('ADDON MSG')
         -- local spellName = select(1, GetSpellInfo(spellID))
         -- print('spell', spellID, spellName)
-        -- print('start (server time)', d[4])
+        -- print('start (server time)', tbl[4])
         -- print('calc local start', start)
         -- print('---------------------')
         if not self.Combat[targetGUID] then
@@ -99,20 +117,20 @@ function Debuffs:CHAT_MSG_ADDON(...)
     end
 end
 
+-- this event fires before CLEU, catch spell data and store as reference to check
 function Debuffs:UNIT_SPELLCAST_SUCCEEDED(...)
     local spellID = select(3, ...)
-    local spellName = select(1, GetSpellInfo(spellID))
     local target = select(1, ...)
     if spellID and target then
         self.UNIT_SPELLCAST_SUCCEEDED_EVENT = {
             SpellID = tonumber(spellID),
             ServerTime = GetServerTime(),
-            TargetGUID = UnitGUID(target),
             SourceGUID = UnitGUID('player'),
         }
     else
         wipe(self.UNIT_SPELLCAST_SUCCEEDED_EVENT)
     end
+    -- local spellName = select(1, GetSpellInfo(spellID))
     -- print('SPELLCAST')
     -- print('spell', spellID, spellName)
     -- print('local time', GetTime())
@@ -120,28 +138,29 @@ function Debuffs:UNIT_SPELLCAST_SUCCEEDED(...)
     -- print('--------------------')
 end
 
-
+-- using this we know the spell landed without being blocked/resisted etc, this keeps start times accurate for cooldown widgets
 function Debuffs:COMBAT_LOG_EVENT_UNFILTERED(...)
     local cleu = {CombatLogGetCurrentEventInfo()}
     if cleu[2] == 'SPELL_CAST_SUCCESS' then
         local sourceGUID = cleu[4]
         local targetGUID = cleu[8]
-        local timestamp = cleu[1]
-        local timestamp_trimmed = tonumber(tostring(timestamp):sub(1, -5))
+        -- local timestamp = cleu[1]
+        -- local timestamp_trimmed = tonumber(tostring(timestamp):sub(1, -5))
         local t = GetTime()
         -- print('CLEU')
         -- print('timestamp', timestamp)
         if self.UNIT_SPELLCAST_SUCCEEDED_EVENT and next(self.UNIT_SPELLCAST_SUCCEEDED_EVENT) then
-            if (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime >= (timestamp_trimmed - 1)) and (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SourceGUID == sourceGUID) then
+            local eventDelay = 1.0
+            if (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime >= (tonumber(tostring(cleu[1]):sub(1, -5)) - eventDelay)) and (self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SourceGUID == sourceGUID) then
                 --print('cleu event matches unit_spellcast event')
                 local inInstance, instanceType = IsInInstance()
                 if inInstance and (instanceType:lower() == 'party' or instanceType:lower() == 'raid') then
                     C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..sourceGUID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime), instanceType:upper())
                 else
                     -- normal option is to just add directly 
-                    --self.Combat[targetGUID][sourceGUID][self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID] = t -- use local time for our own data, send server time and convert back when getting message
+                    --self.Combat[targetGUID][sourceGUID][self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID] = t -- use local time for our own data
                 end
-                -- use this to test
+                -- use this to test sending data
                 C_ChatInfo.SendAddonMessage('debuffs-cast', tostring(targetGUID..'$'..sourceGUID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.SpellID..'$'..self.UNIT_SPELLCAST_SUCCEEDED_EVENT.ServerTime), 'SAY')
             end
         end
